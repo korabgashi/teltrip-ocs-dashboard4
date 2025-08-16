@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 async function postJSON(path, body) {
   const res = await fetch(path, {
@@ -26,6 +26,7 @@ const n = (v) => {
   return Number.isFinite(num) ? num : 0;
 };
 const euro = (v) => `€${n(v).toFixed(2)}`;
+const gb = (v) => `${(n(v) / (1024 ** 3)).toFixed(2)} GB`;
 
 function getICCID(sub) {
   const list = a(sub?.imsiList);
@@ -55,6 +56,23 @@ function cleanDate(dateStr) {
   return d.toISOString().slice(0, 10);
 }
 
+async function fetchUsageForSubscriber(subscriberId) {
+  let total = 0;
+  try {
+    const result = await postJSON("/api/ocs/report", {
+      reportSubscriberUsageOverPeriod: {
+        subscriberId,
+        startDate: "2020-01-01",
+        endDate: new Date().toISOString().slice(0, 10)
+      }
+    });
+    total += n(result?.reportSubscriberUsageOverPeriod?.usedDataBytesTotal);
+  } catch (e) {
+    console.error("Usage error", e);
+  }
+  return total;
+}
+
 export default function Dashboard() {
   const [accountId, setAccountId] = useState(3771);
   const [rows, setRows] = useState([]);
@@ -66,8 +84,14 @@ export default function Dashboard() {
     setError("");
     try {
       const json = await postJSON("/api/ocs/list-subscribers", { accountId });
-      const list = json?.listSubscriber?.subscriberList;
-      setRows(Array.isArray(list) ? list : []);
+      const subscribers = json?.listSubscriber?.subscriberList || [];
+
+      const withUsage = await Promise.all(subscribers.map(async (s) => {
+        const totalUsage = await fetchUsageForSubscriber(s.subscriberId);
+        return { ...s, totalUsageAll: totalUsage };
+      }));
+
+      setRows(withUsage);
     } catch (e) {
       setError(String(e));
       setRows([]);
@@ -104,7 +128,7 @@ export default function Dashboard() {
       <>
         <div style={{
           display: 'grid',
-          gridTemplateColumns: '1fr 2fr 1.5fr 2fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.2fr',
+          gridTemplateColumns: '1fr 2fr 1.5fr 2fr 1.5fr 1.5fr',
           gap: '12px',
           padding: '12px 0',
           fontWeight: 'bold',
@@ -116,17 +140,13 @@ export default function Dashboard() {
           <div>Status</div>
           <div>Package</div>
           <div>Activated</div>
-          <div>Expires</div>
-          <div>Subscr. €</div>
-          <div>Reseller €</div>
-          <div>Profit €</div>
-          <div>Margin</div>
+          <div>Total Usage</div>
         </div>
 
         {rows.map((r, i) => (
           <div key={i} style={{
             display: 'grid',
-            gridTemplateColumns: '1fr 2fr 1.5fr 2fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.2fr',
+            gridTemplateColumns: '1fr 2fr 1.5fr 2fr 1.5fr 1.5fr',
             gap: '12px',
             borderBottom: '1px solid #2a3356',
             padding: '12px 0',
@@ -137,11 +157,7 @@ export default function Dashboard() {
             <div>{formatStatus(r?.status)}</div>
             <div>{formatPackages(r)}</div>
             <div>{cleanDate(r?.activationDate || r?.tsactivationutc)}</div>
-            <div>{cleanDate(r?.expiryDate || r?.tsexpirationutc)}</div>
-            <div>{euro(r?.subscriberCost)}</div>
-            <div>{euro(r?.resellerCostWeeklyTotal)}</div>
-            <div>{euro(r?.profit)}</div>
-            <div>{r?.margin?.toFixed(1)}%</div>
+            <div>{gb(r?.totalUsageAll)}</div>
           </div>
         ))}
 
