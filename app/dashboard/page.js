@@ -3,11 +3,17 @@
 import { useEffect, useState } from "react";
 
 async function postJSON(path, body) {
-  const res = await fetch(path, {
+  let res = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body)
   });
+
+  if (res.status === 405) {
+    const query = new URLSearchParams(Object.entries(body)).toString();
+    res = await fetch(`${path}?${query}`, { method: "GET" });
+  }
+
   const text = await res.text();
   let json;
   try {
@@ -34,6 +40,38 @@ function getICCID(sub) {
   return s(list[0]?.iccid);
 }
 
+function formatStatus(statusArray) {
+  const arr = a(statusArray);
+  if (!arr.length) return "";
+  const current = arr.find(x => !x?.endDate)
+    || arr.slice().sort((a, b) => s(b?.startDate).localeCompare(s(a?.startDate)))[0];
+  const currentLabel = s(current?.status);
+  const distinct = Array.from(new Set(arr.map(x => s(x?.status)).filter(Boolean)));
+  return distinct.length > 1 ? `${currentLabel} (${distinct.join(" / ")})` : currentLabel;
+}
+
+function formatPackages(sub) {
+  const candidates = a(sub?.packageList || sub?.packages || []);
+  const names = candidates.map(p => s(p?.templateName || p?.prepaidPackageTemplateName)).filter(Boolean);
+  return names.join(", ");
+}
+
+function cleanDate(dateStr) {
+  if (!dateStr) return "";
+  const d = new Date(dateStr);
+  return d.toISOString().slice(0, 10);
+}
+
+async function fetchUsageForSubscriber(subscriberId) {
+  try {
+    const result = await postJSON("/api/ocs/usage-total", { subscriberId });
+    return n(result?.totalBytes);
+  } catch (e) {
+    console.error("Usage error", e);
+    return 0;
+  }
+}
+
 export default function Dashboard() {
   const [accountId, setAccountId] = useState(3771);
   const [rows, setRows] = useState([]);
@@ -44,47 +82,15 @@ export default function Dashboard() {
     setLoading(true);
     setError("");
     try {
-      const subs = await postJSON("/api/ocs/list-subscribers", { accountId });
-      const list = subs?.listSubscriber?.subscriberList || [];
+      const json = await postJSON("/api/ocs/list-subscribers", { accountId });
+      const subscribers = json?.listSubscriber?.subscriberList || [];
 
-      const enriched = await Promise.all(list.map(async (sub) => {
-        const subscriberId = sub.subscriberId;
-        const iccid = getICCID(sub);
-
-        const [single, pkg] = await Promise.all([
-          postJSON("/api/ocs/report", { getSingleSubscriber: { subscriberId } }),
-          postJSON("/api/ocs/report", { listSubscriberPrepaidPackages: { subscriberId } })
-        ]);
-
-        const d = a(pkg?.listSubscriberPrepaidPackages);
-        const latest = d[d.length - 1] || {};
-
-        const usedDataByte = n(single?.getSingleSubscriber?.usedDataByte);
-        const pckDataByte = n(single?.getSingleSubscriber?.pckDataByte);
-        const lastUsageDate = s(single?.getSingleSubscriber?.lastUsageDate);
-
-        const subscriberCost = n(latest?.subscriberCost);
-        const resellerCost = n(latest?.resellerCost);
-        const profit = subscriberCost - resellerCost;
-        const margin = subscriberCost > 0 ? (profit / subscriberCost) * 100 : 0;
-
-        return {
-          subscriberId,
-          iccid,
-          templateName: s(latest?.templateName),
-          activationDate: s(latest?.activationDate),
-          expiryDate: s(latest?.expiryDate),
-          lastUsageDate,
-          subscriberCost,
-          resellerCost,
-          usedDataByte,
-          pckDataByte,
-          profit,
-          margin
-        };
+      const withUsage = await Promise.all(subscribers.map(async (s) => {
+        const usage = await fetchUsageForSubscriber(s.subscriberId);
+        return { ...s, totalUsage: usage };
       }));
 
-      setRows(enriched);
+      setRows(withUsage);
     } catch (e) {
       setError(String(e));
       setRows([]);
@@ -121,7 +127,7 @@ export default function Dashboard() {
       <>
         <div style={{
           display: 'grid',
-          gridTemplateColumns: '1fr 2fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr',
+          gridTemplateColumns: '1fr 2fr 2fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.2fr',
           gap: '12px',
           padding: '12px 0',
           fontWeight: 'bold',
@@ -138,31 +144,27 @@ export default function Dashboard() {
           <div>Package Size</div>
           <div>Subscr. €</div>
           <div>Reseller €</div>
-          <div>Profit €</div>
-          <div>Margin %</div>
         </div>
 
         {rows.map((r, i) => (
           <div key={i} style={{
             display: 'grid',
-            gridTemplateColumns: '1fr 2fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr',
+            gridTemplateColumns: '1fr 2fr 2fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.2fr',
             gap: '12px',
             borderBottom: '1px solid #2a3356',
             padding: '12px 0',
             fontSize: 14
           }}>
-            <div>{r.subscriberId}</div>
-            <div style={{ fontFamily: 'monospace' }}>{r.iccid}</div>
-            <div>{r.templateName}</div>
-            <div>{r.activationDate}</div>
-            <div>{r.expiryDate}</div>
-            <div>{r.lastUsageDate}</div>
-            <div>{gb(r.usedDataByte)}</div>
-            <div>{gb(r.pckDataByte)}</div>
-            <div>{euro(r.subscriberCost)}</div>
-            <div>{euro(r.resellerCost)}</div>
-            <div>{euro(r.profit)}</div>
-            <div>{r.margin.toFixed(1)}%</div>
+            <div>{s(r?.subscriberId)}</div>
+            <div>{getICCID(r)}</div>
+            <div>{formatPackages(r)}</div>
+            <div>{cleanDate(r?.activationDate)}</div>
+            <div>{cleanDate(r?.expirationDate)}</div>
+            <div>{cleanDate(r?.tslastusedutc)}</div>
+            <div>{gb(r?.totalUsage)}</div>
+            <div>{gb(r?.packageSizeBytes)}</div>
+            <div>{euro(r?.subscriberCost)}</div>
+            <div>{euro(r?.resellerCost)}</div>
           </div>
         ))}
 
