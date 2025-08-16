@@ -34,45 +34,6 @@ function getICCID(sub) {
   return s(list[0]?.iccid);
 }
 
-function formatStatus(statusArray) {
-  const arr = a(statusArray);
-  if (!arr.length) return "";
-  const current = arr.find(x => !x?.endDate)
-    || arr.slice().sort((a, b) => s(b?.startDate).localeCompare(s(a?.startDate)))[0];
-  const currentLabel = s(current?.status);
-  const distinct = Array.from(new Set(arr.map(x => s(x?.status)).filter(Boolean)));
-  return distinct.length > 1 ? `${currentLabel} (${distinct.join(" / ")})` : currentLabel;
-}
-
-function formatPackages(sub) {
-  const candidates = a(sub?.packageList || sub?.packages || []);
-  const names = candidates.map(p => s(p?.templateName || p?.prepaidPackageTemplateName)).filter(Boolean);
-  return names.join(", ");
-}
-
-function cleanDate(dateStr) {
-  if (!dateStr) return "";
-  const d = new Date(dateStr);
-  return d.toISOString().slice(0, 10);
-}
-
-async function fetchUsageForSubscriber(subscriberId) {
-  let total = 0;
-  try {
-    const result = await postJSON("/api/ocs/report", {
-      reportSubscriberUsageOverPeriod: {
-        subscriberId,
-        startDate: "2020-01-01",
-        endDate: new Date().toISOString().slice(0, 10)
-      }
-    });
-    total += n(result?.reportSubscriberUsageOverPeriod?.usedDataBytesTotal);
-  } catch (e) {
-    console.error("Usage error", e);
-  }
-  return total;
-}
-
 export default function Dashboard() {
   const [accountId, setAccountId] = useState(3771);
   const [rows, setRows] = useState([]);
@@ -83,15 +44,47 @@ export default function Dashboard() {
     setLoading(true);
     setError("");
     try {
-      const json = await postJSON("/api/ocs/list-subscribers", { accountId });
-      const subscribers = json?.listSubscriber?.subscriberList || [];
+      const subs = await postJSON("/api/ocs/list-subscribers", { accountId });
+      const list = subs?.listSubscriber?.subscriberList || [];
 
-      const withUsage = await Promise.all(subscribers.map(async (s) => {
-        const totalUsage = await fetchUsageForSubscriber(s.subscriberId);
-        return { ...s, totalUsageAll: totalUsage };
+      const enriched = await Promise.all(list.map(async (sub) => {
+        const subscriberId = sub.subscriberId;
+        const iccid = getICCID(sub);
+
+        const [single, pkg] = await Promise.all([
+          postJSON("/api/ocs/report", { getSingleSubscriber: { subscriberId } }),
+          postJSON("/api/ocs/report", { listSubscriberPrepaidPackages: { subscriberId } })
+        ]);
+
+        const d = a(pkg?.listSubscriberPrepaidPackages);
+        const latest = d[d.length - 1] || {};
+
+        const usedDataByte = n(single?.getSingleSubscriber?.usedDataByte);
+        const pckDataByte = n(single?.getSingleSubscriber?.pckDataByte);
+        const lastUsageDate = s(single?.getSingleSubscriber?.lastUsageDate);
+
+        const subscriberCost = n(latest?.subscriberCost);
+        const resellerCost = n(latest?.resellerCost);
+        const profit = subscriberCost - resellerCost;
+        const margin = subscriberCost > 0 ? (profit / subscriberCost) * 100 : 0;
+
+        return {
+          subscriberId,
+          iccid,
+          templateName: s(latest?.templateName),
+          activationDate: s(latest?.activationDate),
+          expiryDate: s(latest?.expiryDate),
+          lastUsageDate,
+          subscriberCost,
+          resellerCost,
+          usedDataByte,
+          pckDataByte,
+          profit,
+          margin
+        };
       }));
 
-      setRows(withUsage);
+      setRows(enriched);
     } catch (e) {
       setError(String(e));
       setRows([]);
@@ -128,7 +121,7 @@ export default function Dashboard() {
       <>
         <div style={{
           display: 'grid',
-          gridTemplateColumns: '1fr 2fr 1.5fr 2fr 1.5fr 1.5fr',
+          gridTemplateColumns: '1fr 2fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr',
           gap: '12px',
           padding: '12px 0',
           fontWeight: 'bold',
@@ -137,27 +130,39 @@ export default function Dashboard() {
         }}>
           <div>ID</div>
           <div>ICCID</div>
-          <div>Status</div>
           <div>Package</div>
           <div>Activated</div>
-          <div>Total Usage</div>
+          <div>Expires</div>
+          <div>Last Usage</div>
+          <div>Used</div>
+          <div>Package Size</div>
+          <div>Subscr. €</div>
+          <div>Reseller €</div>
+          <div>Profit €</div>
+          <div>Margin %</div>
         </div>
 
         {rows.map((r, i) => (
           <div key={i} style={{
             display: 'grid',
-            gridTemplateColumns: '1fr 2fr 1.5fr 2fr 1.5fr 1.5fr',
+            gridTemplateColumns: '1fr 2fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr',
             gap: '12px',
             borderBottom: '1px solid #2a3356',
             padding: '12px 0',
             fontSize: 14
           }}>
-            <div>{s(r?.subscriberId)}</div>
-            <div style={{ fontFamily: 'monospace' }}>{getICCID(r)}</div>
-            <div>{formatStatus(r?.status)}</div>
-            <div>{formatPackages(r)}</div>
-            <div>{cleanDate(r?.activationDate || r?.tsactivationutc)}</div>
-            <div>{gb(r?.totalUsageAll)}</div>
+            <div>{r.subscriberId}</div>
+            <div style={{ fontFamily: 'monospace' }}>{r.iccid}</div>
+            <div>{r.templateName}</div>
+            <div>{r.activationDate}</div>
+            <div>{r.expiryDate}</div>
+            <div>{r.lastUsageDate}</div>
+            <div>{gb(r.usedDataByte)}</div>
+            <div>{gb(r.pckDataByte)}</div>
+            <div>{euro(r.subscriberCost)}</div>
+            <div>{euro(r.resellerCost)}</div>
+            <div>{euro(r.profit)}</div>
+            <div>{r.margin.toFixed(1)}%</div>
           </div>
         ))}
 
